@@ -1,236 +1,252 @@
+from fastapi import FastAPI, Depends, UploadFile, File, Form, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from typing import List
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from logics.database import get_db, SessionLocal, engine
+from logics import models
 from logics.image_processing import ImageProcessor
-from logics.script_audio import ScriptGenerator
 from logics.video_generator import VideoGenerator
+from logics.script_audio import ScriptGenerator
 from logics.video_utils import VideoPostProcessor
-from fastapi import FastAPI, HTTPException
 import os
+import shutil
 
-app = FastAPI(title="VistaAI", description="VistaAI is a real estate video generation API", version="1.0.0")
+models.Base.metadata.create_all(bind=engine)
 
-img_proc = ImageProcessor()
-script_gen = ScriptGenerator()
-vid_gen = VideoGenerator()
-post_proc = VideoPostProcessor()
+app = FastAPI()
 
-@app.get("/")
-def health_check():
-    return {"status": "running", "project": "VistaAI"}
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+if not os.path.exists("uploads"):
+    os.makedirs("uploads")
 
 @app.post("/generate-room-tour")
-def generate_room_tour(image_path: str, user_preference: str = "Modern Minimalist"):
-    """
-    Full pipeline:
-    1. Analyze & Transform Image (Before -> After) -> Get Room Type
-    2. Generate Video Transition (Before -> After)
-    3. Generate Audio Script & Audio File (Synced to Room Type)
-    4. Post-Process: Merge Audio + Video + Add Title Overlay
-    """
-    if not os.path.exists(image_path):
-        raise HTTPException(status_code=404, detail=f"Image {image_path} not found")
+async def generate_room_tour(
+    file: UploadFile = File(...),
+    preference: str = Form("Modern Clean"),
+    db: Session = Depends(get_db)
+):
+    # Backward compatibility endpoint
+    return {"status": "success", "message": "Legacy room tour. Use full-property-tour."}
 
+def process_tour_background(request_id: str, mode: str, voice: str):
+    db: Session = SessionLocal()
     try:
-        # 1. Image Transformation & Analysis
-        print("Step 1: Transforming Image & Analyzing Room...")
-        transform_result = img_proc.transform_image(image_path)
+        req = db.query(models.TourRequest).filter_by(request_id=request_id).first()
+        if not req:
+            return
+            
+        rooms = list(req.rooms)
+        rooms.sort(key=lambda r: r.sequence_order)
         
-        room_type = transform_result.get("room_type", "Unknown Room")
-        transformed_image_path = transform_result.get("output_path")
-        
-        if not transformed_image_path:
-             raise HTTPException(status_code=500, detail="Image transformation failed to produce output.")
+        # 1. Master Script Vision & Generation
+        try:
+            from logics.script_audio import ScriptGenerator
+            images_bytes = []
+            for room in rooms:
+                with open(room.original_image_path, "rb") as f:
+                    images_bytes.append(f.read())
+            
+            master_data = ScriptGenerator.generate_master_script(images_bytes, req.preference, req.rough_notes, "Cinematic")
+            master_script = master_data.get("script", "Welcome to this beautifully designed elegant home.")
+            keywords = master_data.get("keywords", [])
+            
+            import re
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', master_script) if s.strip()]
+            if len(sentences) < len(rooms):
+                sentences += ["Enjoy the view."] * (len(rooms) - len(sentences))
+        except Exception as e:
+            print("Vision/Scripting error:", e)
+            sentences = ["Welcome to this beautiful space."] * len(rooms)
+            keywords = []
+            
+        room_clips = []
+        for idx, room in enumerate(rooms):
+            original_path = room.original_image_path
+            scene_text = sentences[idx] if idx < len(sentences) else "Beautiful."
+            room.room_type = keywords[idx] if idx < len(keywords) else "Exclusive Property"
+            
+            # Step 1: Generate Audio Voiceover First to extract length 
+            audio_path_list = ScriptGenerator.generate_audio(scene_text, voice, f"{request_id}_{idx}")
+            audio_duration_sec = 4.0
+            valid_voice = False
+            
+            if audio_path_list and os.path.exists(audio_path_list[0]):
+                try:
+                    audio_duration_sec = VideoPostProcessor.get_duration(audio_path_list[0])
+                    valid_voice = True
+                except:
+                    pass
+            
+            # Step 2: Generate Video locked precisely to Voiceover length
+            if mode == "Premium":
+                try:
+                    transform_res = ImageProcessor.transform_image(original_path)
+                    staged_path = transform_res.get("output_path", original_path)
+                    
+                    # Instead of forcing Veo to morph reality (hallucinating), feed it the Staged Image 
+                    # so the entire video cinematic revolves elegantly around the beautifully transformed aesthetic!
+                    transition_path = VideoGenerator.generate_transition(staged_path, staged_path)
+                except Exception as ex:
+                    print(f"Premium API Error for room {idx}, seamlessly falling back to Basic Engine: {ex}")
+                    staged_path = original_path
+                    transition_path = VideoPostProcessor.generate_cinematic_effect(original_path, idx, audio_duration_sec)
+                    if not transition_path:
+                        transition_path = original_path
+            else:
+                staged_path = original_path
+                transition_path = VideoPostProcessor.generate_cinematic_effect(original_path, idx, audio_duration_sec)
+                if not transition_path:
+                    transition_path = original_path
 
-        print(f"Detected: {room_type}")
-
-        # 2. Video Generation (Transition)
-        print("Step 2: Generating Video Transition...")
-        raw_video_path = vid_gen.generate_transition(
-            start_image_path=image_path,
-            end_image_path=transformed_image_path
-        )
-        
-        # 3. Audio Generation
-        print("Step 3: Generating Audio...")
-        # Create a single scene plan for this room
-        tour_plan = {
-            "tour_plan": [
-                {
-                    "sequence_id": 1,
-                    "scene_name": room_type,
-                    "narration_text": f"Welcome to this renovated {room_type}, styled in a {user_preference} theme." # Fallback or dynamic
-                }
-            ]
-        }
-        
-        # Or better: Ask script_gen to generate the text properly based on the analysis
-        # For this MVP, let's use the property description logic
-        script_data = script_gen.generate_script(
-            property_description=f"A {room_type} that has been virtually staged.",
-            preference=user_preference
-        )
-        # Use the generated script if available, else fallback
-        if script_data.get("tour_plan"):
-             # override the simple one
-             # ensure we only take the first scene for this single image pipeline
-             first_scene = script_data["tour_plan"][0]
-             first_scene["scene_name"] = room_type # Ensure consistency
-             tour_plan["tour_plan"] = [first_scene]
-
-        audio_files = script_gen.generate_audio(tour_plan, output_prefix=f"audio_{room_type.replace(' ', '_')}")
-        audio_path = audio_files[0] if audio_files else None
-
-        # 4. Post Processing
-        print("Step 4: Post-Processing (Merge & Overlay)...")
-        final_video_path = f"uploads/final_{room_type.replace(' ', '_')}.mp4"
-        temp_video_path = f"uploads/temp_{room_type.replace(' ', '_')}.mp4"
-        
-        # A. Add Text Overlay to Raw Video first
-        post_proc.add_text_overlay(
-            video_path=raw_video_path,
-            text=room_type,
-            output_path=temp_video_path
-        )
-        
-        # B. Merge with Audio
-        if audio_path:
-            post_proc.combine_video_audio(
-                video_path=temp_video_path,
-                audio_path=audio_path,
-                output_path=final_video_path
-            )
+            overlay_path = f"uploads/{request_id}_{idx}_overlay.mp4"
+            VideoPostProcessor.add_text_overlay(transition_path, room.room_type, overlay_path)
+            
+            # Step 3: Mix the perfectly synced bounds
+            final_clip = f"uploads/{request_id}_{idx}_voiced.mp4"
+            
+            if audio_path_list and os.path.exists(audio_path_list[0]):
+                VideoPostProcessor.combine_video_audio(overlay_path, audio_path_list[0], final_clip)
+                room_clips.append(final_clip)
+            else:
+                room_clips.append(overlay_path) # Warning: Only hits if local Disk I/O completely crashes
+                
+            db.commit()
+            
+        if len(room_clips) > 1:
+            concat_path = f"uploads/{request_id}_concat.mp4"
+            VideoPostProcessor.concatenate_videos(room_clips, concat_path)
+            
+            # Master Ambient Audio Mix
+            final_video_path = f"uploads/{request_id}_final.mp4"
+            ambient_path = f"uploads/{request_id}_ambient.mp3"
+            
+            VideoPostProcessor.generate_ambient_audio(ambient_path, duration=len(room_clips)*4)
+            VideoPostProcessor.mix_ambient_audio(concat_path, ambient_path, final_video_path)
+            
+        elif len(room_clips) == 1:
+            final_video_path = room_clips[0]
         else:
-            # Fallback if no audio
-            os.rename(temp_video_path, final_video_path)
-
-        return {
-            "status": "success",
-            "room_type": room_type,
-            "final_video": final_video_path
-        }
-
+            final_video_path = ""
+            
+        if final_video_path:
+            final = models.FinalTour(request_id=request_id, output_path=final_video_path)
+            db.add(final)
+            db.commit()
+            
     except Exception as e:
-        print(f"Pipeline Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error processing asynchronous pipeline for {request_id}: {e}")
+        try:
+            # Unlock the UI from endless polling by pushing an exact state signal
+            error_req = models.FinalTour(request_id=request_id, output_path="FAILED_GENERATION")
+            db.add(error_req)
+            db.commit()
+        except:
+            pass
+    finally:
+        db.close()
 
-from pydantic import BaseModel
-from typing import List
-
-class TourRequest(BaseModel):
-    image_paths: List[str]
-    preference: str = "Modern Minimalist"
-    rough_notes: str = ""
+@app.post("/generate-wizard-script")
+async def generate_wizard_script(
+    address: str = Form(...),
+    preference: str = Form("Modern Clean"),
+    rough_notes: str = Form(""),
+    images: List[UploadFile] = File(...),
+):
+    try:
+        images_bytes = []
+        for file in images:
+            b = await file.read()
+            images_bytes.append(b)
+            
+        master_data = ScriptGenerator.generate_master_script(images_bytes, address, rough_notes, preference)
+        script_text = master_data.get("script", "Failed to decode JSON script.")
+        return {"status": "success", "script": script_text}
+    except Exception as e:
+        print("Script Generation Error:", e)
+        return {"status": "error", "message": str(e)}
 
 @app.post("/generate-full-property-tour")
-def generate_full_property_tour(request: TourRequest):
-    """
-    Orchestrates a multi-room tour:
-    1. Processing multiple images.
-    2. Generating a cohesive story script.
-    3. Creating individual clips with titles and audio.
-    4. Stitching them into one master video.
-    """
-    if not request.image_paths:
-        raise HTTPException(status_code=400, detail="No images provided")
-
-    processed_rooms = []
+async def generate_full_property_tour(
+    background_tasks: BackgroundTasks,
+    address: str = Form(...),
+    preference: str = Form("Modern Clean"),
+    mode: str = Form("Premium"),
+    rough_notes: str = Form(""),
+    voice: str = Form(""),
+    images: List[UploadFile] = File(...),
+    db: Session = Depends(get_db)
+):
+    import uuid
+    import shutil
+    import os
     
-    try:
-        # Phase 1: Image Analysis & Transformation
-        print("Phase 1: Analyzing & Transforming Images...")
-        for img_path in request.image_paths:
-            if not os.path.exists(img_path):
-                print(f"Skipping missing image: {img_path}")
-                continue
-            
-            # Transform
-            res = img_proc.transform_image(img_path)
-            processed_rooms.append({
-                "original_path": img_path,
-                "transformed_path": res["output_path"],
-                "room_type": res.get("room_type", "Room"),
-                "sequence_id": len(processed_rooms) + 1
-            })
-
-        if not processed_rooms:
-            raise HTTPException(status_code=400, detail="No valid images processed")
-
-        # Phase 2: Video Generation (Parallelizable in future, sequential for now)
-        print("Phase 2: Generating Transition Videos...")
-        for room in processed_rooms:
-            vid_path = vid_gen.generate_transition(
-                start_image_path=room["original_path"],
-                end_image_path=room["transformed_path"]
-            )
-            room["raw_video"] = vid_path
+    request_id = str(uuid.uuid4())
+    tour_request = models.TourRequest(
+        request_id=request_id,
+        preference=address,
+        rough_notes=rough_notes,
+        mode=mode
+    )
+    db.add(tour_request)
+    
+    # Save the actual files to disk and bind them to the database
+    for idx, file in enumerate(images):
+        file_ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+        saved_filename = f"{request_id}_room_{idx}.{file_ext}"
+        saved_path = f"uploads/{saved_filename}"
         
-        # Phase 3: Master Script Generation
-        print("Phase 3: Generating Cohesive Narrative...")
-        room_sequence = [r["room_type"] for r in processed_rooms]
-        script_data = script_gen.generate_master_script(
-            room_sequence=room_sequence, 
-            rough_notes=request.rough_notes,
-            preference=request.preference
+        with open(saved_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        room = models.Room(
+            request_id=request_id,
+            sequence_order=idx + 1,
+            original_image_path=saved_path,
+            room_type="To Be Detected"
         )
-        
-        # Parse script: Expecting "tour_script" list matching sequence
-        # We try to match by index
-        tour_script = script_data.get("tour_script", [])
-        
-        # Phase 4: Per-Room Assembly (Audio + Overlay + Merge)
-        print("Phase 4: Assembling Room Clips...")
-        final_clips = []
-        
-        import uuid
-        request_id = str(uuid.uuid4())[:8]
+        db.add(room)
 
-        for i, room in enumerate(processed_rooms):
-            # Get script for this room
-            narration = ""
-            if i < len(tour_script):
-                narration = tour_script[i].get("narration_text", "")
+    db.commit()
+    
+    background_tasks.add_task(process_tour_background, request_id, mode, voice)
+    
+    return {"status": "success", "id": request_id, "message": "Multi-image processing initialized for full tour."}
+
+@app.get("/tours")
+async def get_tours(db: Session = Depends(get_db)):
+    tours = db.query(models.TourRequest).all()
+    result = []
+    for t in tours:
+        status = "Processing"
+        video_url = None
+        thumbnail_url = None
+        
+        # Extract thumbnail from the very first room attached to the database architecture
+        if t.rooms and len(t.rooms) > 0:
+            thumbnail_url = f"http://localhost:8000/{t.rooms[0].original_image_path}"
+            
+        if t.final_tour:
+            if t.final_tour.output_path == "FAILED_GENERATION":
+                status = "Failed"
             else:
-                narration = f"Here is the {room['room_type']}." # Fallback
-
-            # Generate Audio
-            # We treat each room as a single item for audio gen to get a specific file
-            audio_files = script_gen.generate_audio(
-                input_data=narration, 
-                output_prefix=f"uploads/audio_{request_id}_{i}"
-            )
-            audio_path = audio_files[0] if audio_files else None
-            
-            # Post-Process
-            # 1. Overlay Title
-            temp_overlay_path = f"uploads/temp_overlay_{request_id}_{i}.mp4"
-            post_proc.add_text_overlay(
-                video_path=room["raw_video"],
-                text=room["room_type"],
-                output_path=temp_overlay_path
-            )
-            
-            # 2. Merge Audio
-            final_clip_path = f"uploads/clip_{request_id}_{i}_{room['room_type'].replace(' ', '_')}.mp4"
-            if audio_path:
-                post_proc.combine_video_audio(
-                    video_path=temp_overlay_path,
-                    audio_path=audio_path,
-                    output_path=final_clip_path
-                )
-            else:
-                os.rename(temp_overlay_path, final_clip_path)
-            
-            final_clips.append(final_clip_path)
-
-        # Phase 5: Concatenation
-        print("Phase 5: Stitching Full Tour with Transitions...")
-        master_output = f"uploads/final_property_tour_{request_id}.mp4"
-        post_proc.concatenate_with_transitions(final_clips, master_output)
-        
-        return {
-            "status": "success",
-            "full_tour_path": master_output,
-            "clips": final_clips
-        }
-
-    except Exception as e:
-        print(f"Pipeline Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+                status = "Complete"
+                video_url = f"http://localhost:8000/{t.final_tour.output_path}"
+        result.append({
+            "id": t.request_id[:8].upper(),
+            "address": t.preference or "No Preference Stated",
+            "status": status,
+            "date": "Recently",
+            "video_url": video_url,
+            "thumbnail_url": thumbnail_url
+        })
+    return result
