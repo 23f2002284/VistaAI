@@ -202,8 +202,8 @@ classDiagram
 ```mermaid
 flowchart LR
     subgraph Actors
-        PO["Property\nOwner"]
-        DA["Developer\n/ Admin"]
+        PO@{ icon: "fa:user", label: "Property Owner" }
+        DA@{ icon: "fa:user-cog", label: "Developer\n/ Admin" }
     end
 
     subgraph VistaAI System
