@@ -5,8 +5,8 @@
 ```mermaid
 flowchart LR
     subgraph Actors
-        PO(("🏠 Property\nOwner"))
-        DA(("🔧 Developer\n/ Admin"))
+        PO["Property\nOwner"]
+        DA["Developer\n/ Admin"]
     end
 
     subgraph VistaAI System
@@ -46,9 +46,9 @@ flowchart LR
 ```mermaid
 flowchart LR
     subgraph Actors
-        PO(("🏠 Property\nOwner"))
-        DA(("🔧 Developer\n/ Admin"))
-        AI(("🤖 AI Services\n(Gemini/Veo/FFmpeg)"))
+        PO["Property\nOwner"]
+        DA["Developer\n/ Admin"]
+        AI["AI Services\n(Gemini/Veo/FFmpeg)"]
     end
 
     subgraph VistaAI["VistaAI System"]

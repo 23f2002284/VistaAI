@@ -53,24 +53,19 @@ VistaAI doesn't just "make videos"—it orchestrates a multi-stage creative proc
 
 ```mermaid
 flowchart TD
-    Start(( )) --> Upload([User Submits Images + Preferences])
-    Upload --> Analysis([Gemini Vision: Detect Room Type & Vibe])
-    Analysis --> Staging([Nano-Banana-Pro: Virtual Interior Design])
-    Staging --> Video([Veo 3.1: Synthesis of Cinematic Transitions])
-    Video --> Audio([Narration Script & Neural TTS Engine])
-    Audio --> Assemble([FFmpeg: Text Overlays + Voice Mix])
-    Assemble --> Final([Master Tour Concatenation with Crossfades])
-    Final --> End((◉))
-
-    style Start fill:#000,stroke:#000
-    style End fill:#000,stroke:#333
-    style Analysis fill:#bfdbfe,stroke:#2563eb
-    style Staging fill:#bfdbfe,stroke:#2563eb
-    style Video fill:#bbf7d0,stroke:#16a34a
-    style Audio fill:#fef08a,stroke:#ca8a04
-    style Assemble fill:#fbcfe8,stroke:#db2777
-    style Final fill:#d9f99d,stroke:#65a30d
+    S(( )) --> A([User Upload Property Images])
+    A --> B([Validate Images])
+    B --> C([Upload & Update Narration, Tone])
+    C --> D([Transformed Images])
+    D --> E([Generate Videos])
+    E --> F([Script Generation])
+    F --> G([Audio Generate])
+    G --> H([Stitch Content])
+    H --> I([Return Generated Video])
+    I --> Z((◉))
 ```
+
+![Activity Diagram](file:///c:/Users/praty/Desktop/SE%20Project/diagrams/activity%20diagram.jpeg)
 
 ---
 
@@ -116,91 +111,122 @@ To ensure technical maintainability, VistaAI is documented with full UML specifi
 ### 🧵 Sequence Diagram (Orchestration Logic)
 ```mermaid
 sequenceDiagram
-    actor PO as 🏠 Property Owner
+    actor PO as Property Owner
+    participant UI as Interface
     participant API as FastAPI Server
-    participant IMG as ImageProcessor
-    participant VID as VideoGenerator
-    participant SCR as ScriptGenerator
-    participant PP as VideoPostProcessor (FFmpeg)
+    participant IMG as Image Generate<br/>Pipeline
+    participant VID as Video Generate<br/>Pipeline
+    participant AUD as Audio Generate<br/>Pipeline
 
-    PO->>API: POST /generate-full-property-tour
-    Note over API: Step 1: Vision Analysis & Staging
-    API->>IMG: transform_image(image_path)
-    IMG-->>API: {room_type, staged_image_path}
-    
-    Note over API: Step 2: Video Transition Synthesis
-    API->>VID: generate_transition(staged, staged)
-    VID-->>API: transition_video.mp4
-    
-    Note over API: Step 3: Script & Audio Production
-    API->>SCR: generate_master_script()
-    SCR->>SCR: TTS Synthesis via Edge-TTS
-    SCR-->>API: narration_audio.mp3
-    
-    Note over API: Step 4: Final Studio Assembly
-    API->>PP: add_text_overlay()
-    API->>PP: combine_video_audio()
-    API->>PP: concatenate_with_transitions()
-    PP-->>API: final_tour.mp4
-    API-->>PO: Return Tour URL
+    PO->>UI: Upload Image
+    PO->>UI: Upload Narration, Tone
+    PO->>UI: Click Generate Video
+
+    UI->>API: POST /generate-room-tour
+
+    API->>IMG: Forward Validated Image
+    IMG-->>API: Return Transformed Image
+
+    API->>VID: Forward Validated Image<br/>& Transformed Image
+    VID-->>API: Return Video
+
+    API->>AUD: Forward Generated Video<br/>& Merged Narration
+    AUD-->>API: Script, Audio Script<br/>(Text & Audio)
+
+    API-->>UI: Return Contents
+    UI-->>PO: Stitched Generated Videos<br/>+ Narration Audio
 ```
+
+![Sequence Diagram](file:///c:/Users/praty/Desktop/SE%20Project/diagrams/sequence%20diagram.jpeg)
 
 ### ⚓ Class Diagram (System Hierarchy)
 ```mermaid
 classDiagram
     direction LR
-    class TourRequest {
-        +List~str~ image_paths
-        +str preference
-        +str rough_notes
+
+    class User {
+        +UUID vid
+        +String name
+        +String joined
+        +upload_image()
+        +upload_narration()
+        +upload_tone()
     }
-    class ImageProcessor {
-        +prompt_generate(image_path)
-        +transform_image(image_path)
+
+    class Image {
+        +String image_address
+        +String shape
+        +transform()
+        +validate()
     }
+
+    class Requirements {
+        +String narration
+        +String tone
+        +validate()
+    }
+
     class VideoGenerator {
-        +generate_transition(start, end)
+        +String original_image
+        +String transformed_image
+        +generate_video()
     }
-    class ScriptGenerator {
-        +generate_master_script()
-        +generate_audio()
+
+    class AudioScriptGenerator {
+        +String video_gen
+        +String narration
+        +String script
+        +String sequence_json
+        +script_gen()
+        +audio_gen()
     }
-    class VideoPostProcessor {
-        +add_text_overlay()
-        +combine_video_audio()
-        +concatenate_with_transitions()
+
+    class FinalVideo {
+        +String generated_video_address
+        +String response
+        +stitch_content()
+        +update_content()
     }
-    
-    TourRequest --> ImageProcessor
-    ImageProcessor --> VideoGenerator
-    VideoGenerator --> VideoPostProcessor
-    ScriptGenerator --> VideoPostProcessor
+
+    User --> Image : uploads
+    User --> Requirements : uploads
+    Image --> VideoGenerator : processed by
+    VideoGenerator --> AudioScriptGenerator : used by
+    Requirements --> AudioScriptGenerator : used by
+    AudioScriptGenerator --> FinalVideo : stitched by
 ```
+
+![Class Diagram](file:///c:/Users/praty/Desktop/SE%20Project/diagrams/class%20diagram.jpeg)
 
 ### 👥 Use Case Diagram
 ```mermaid
 flowchart LR
-    PO(("🏠 Property Owner"))
-    AI(("🤖 AI Services"))
-    
-    subgraph VistaAI
-        UC1([Upload Images])
-        UC2([Select Style Preference])
-        UC3([Generate Video Tour])
-        UC4([Download MP4 Asset])
-        UC5([Analyze Room])
-        UC6([Generate Voiceover])
+    subgraph Actors
+        PO["Property\nOwner"]
+        DA["Developer\n/ Admin"]
     end
-    
+
+    subgraph VistaAI System
+        UC1([Upload Image])
+        UC2([Update Narration & Tone])
+        UC3([Review Generated Video])
+        UC4([Regenerate Video with\nUpdated Requirements])
+        UC5([User Management\n& Access Control])
+        UC6([Video Generation\n& Update Log])
+    end
+
     PO --- UC1
     PO --- UC2
     PO --- UC3
-    UC3 --- UC4
-    AI --- UC5
-    AI --- UC6
-    UC3 -.->|includes| UC1
-    UC3 -.->|includes| UC5
+    PO --- UC4
+
+    UC2 -.->|"«extends»"| UC3
+
+    DA --- UC5
+    DA --- UC6
 ```
+
+![Use Case Diagram](file:///c:/Users/praty/Desktop/SE%20Project/diagrams/use%20case.jpeg)
 
 ---
 
